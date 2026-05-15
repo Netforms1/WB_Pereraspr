@@ -5,7 +5,12 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from app.bot.keyboards import (
     BTN_ADD,
@@ -41,8 +46,7 @@ async def _block_others(msg: Message) -> None:
 
 
 class LoginSG(StatesGroup):
-    phone = State()
-    code = State()
+    waiting_browser = State()
 
 
 class AddSG(StatesGroup):
@@ -76,50 +80,63 @@ async def fsm_cancel(msg: Message, state: FSMContext) -> None:
         await msg.answer("Меню:", reply_markup=main_menu_kb())
 
 
-# ---------- Логин ---------------------------------------------------------
+# ---------- Логин через окно браузера -------------------------------------
 
 @router.message(Command("login"))
 @router.message(F.text == BTN_LOGIN)
 async def cmd_login(msg: Message, state: FSMContext) -> None:
-    await state.set_state(LoginSG.phone)
-    await msg.answer(
-        "Введите телефон в формате 79991234567",
-        reply_markup=fsm_cancel_kb(),
-    )
-
-
-@router.message(LoginSG.phone)
-async def login_phone(msg: Message, state: FSMContext) -> None:
-    phone = (msg.text or "").strip()
-    if not phone.isdigit() or len(phone) < 10:
-        await msg.answer("Похоже на не-номер. Попробуйте ещё раз.")
-        return
     wb = get_wb_client()
+    await msg.answer("Открываю окно браузера WB…")
     try:
-        await wb.request_sms_code(phone)
-    except WBError as e:
-        await state.clear()
-        await msg.answer(f"WB отказал: {e}", reply_markup=main_menu_kb())
-        return
-    await state.set_state(LoginSG.code)
-    await msg.answer("Код из SMS пришлите сюда.", reply_markup=fsm_cancel_kb())
-
-
-@router.message(LoginSG.code)
-async def login_code(msg: Message, state: FSMContext) -> None:
-    code = (msg.text or "").strip()
-    wb = get_wb_client()
-    try:
-        await wb.verify_sms_code(code)
-    except WBError as e:
-        await state.clear()
+        await wb.login_open()
+    except Exception as e:
         await msg.answer(
-            f"Не приняло код: {e}\nПопробуйте ещё раз.",
+            f"Не удалось открыть браузер: {e}\n"
+            "Проверь, что выполнен `playwright install chromium`.",
             reply_markup=main_menu_kb(),
         )
         return
+    await state.set_state(LoginSG.waiting_browser)
+    await msg.answer(
+        "Окно браузера открыто. Решите капчу, войдите в кабинет ВБ "
+        "по SMS как обычно.\n\n"
+        "Когда увидите главную страницу кабинета — нажмите «✅ Я вошёл».",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Я вошёл", callback_data="login:done"),
+                    InlineKeyboardButton(text="✖️ Отмена", callback_data="login:cancel"),
+                ]
+            ]
+        ),
+    )
+
+
+@router.callback_query(LoginSG.waiting_browser, F.data == "login:done")
+async def login_done(cb: CallbackQuery, state: FSMContext) -> None:
+    wb = get_wb_client()
+    try:
+        await wb.login_finish()
+    except WBError as e:
+        await state.clear()
+        await cb.message.edit_text(f"Не удалось сохранить сессию: {e}")
+        await cb.message.answer("Попробуйте /login ещё раз.", reply_markup=main_menu_kb())
+        await cb.answer()
+        return
     await state.clear()
-    await msg.answer("Сессия сохранена.", reply_markup=main_menu_kb())
+    await cb.message.edit_text("✅ Сессия сохранена.")
+    await cb.message.answer("Меню:", reply_markup=main_menu_kb())
+    await cb.answer()
+
+
+@router.callback_query(LoginSG.waiting_browser, F.data == "login:cancel")
+async def login_cancel(cb: CallbackQuery, state: FSMContext) -> None:
+    wb = get_wb_client()
+    await wb.login_abort()
+    await state.clear()
+    await cb.message.edit_text("Отменено, окно браузера закрыто.")
+    await cb.message.answer("Меню:", reply_markup=main_menu_kb())
+    await cb.answer()
 
 
 # ---------- Склады --------------------------------------------------------

@@ -35,10 +35,14 @@ Telegram-бот для автоматического перераспредел
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+playwright install chromium
 cp .env.example .env
 # заполнить TG_BOT_TOKEN, TG_OWNER_ID, SESSION_ENCRYPTION_KEY
 python -m app.main
 ```
+
+`playwright install chromium` скачивает встроенный Chromium (~150 МБ) —
+именно в нём бот будет открывать страницу WB.
 
 Сгенерировать ключ шифрования:
 
@@ -46,26 +50,41 @@ python -m app.main
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-## Что нужно дописать руками: WB API
+## Как работает WB-клиент
 
-У функции «Перераспределение остатков» **нет публичного API** —
-это внутренний интерфейс кабинета продавца. В `app/wb/client.py`
-эндпоинты и payload-ы помечены `# TODO(WB)`. Их нужно один раз
-снять из DevTools браузера:
+WB защищает кабинет слайдер-капчей и обязательной подписью `X-Req-Sign`
+на каждом API-запросе. Голым HTTP не пройти — поэтому бот работает
+через настоящий Chromium (Playwright):
 
-1. Откройте `https://seller.wildberries.ru` в Chrome, DevTools → Network.
-2. Зайдите по SMS — запишите URL и тело запросов:
-   - запрос SMS-кода (`URL_SMS_REQUEST`)
-   - подтверждение кода (`URL_SMS_VERIFY`)
-3. Откройте раздел перераспределения остатков — запишите:
-   - GET списка доступных складов (`URL_WAREHOUSES`) и его JSON-схему
-   - POST самого перераспределения (`URL_REDISTRIBUTE`) и его payload
-4. Подставьте URL/тела/заголовки в `app/wb/client.py` вместо `# TODO(WB)`.
-   Часто нужны cookies типа `WBToken`, `x-supplier-id` либо заголовок
-   `Authorization: Bearer ...` — посмотрите, что фронт реально шлёт.
+1. **Логин.** По кнопке «🔑 Войти» бот открывает **видимое окно**
+   Chromium на странице входа WB. Пользователь сам решает капчу,
+   вводит телефон и SMS-код. Когда видит главную страницу кабинета —
+   жмёт в Telegram «✅ Я вошёл». Бот снимает `storage_state` (cookies
+   + localStorage + IndexedDB) и кладёт в БД зашифрованным.
 
-Эти эндпоинты ВБ периодически меняет. Если бот вдруг перестал работать —
-первое, что проверить, не съехала ли схема в DevTools.
+2. **Фоновые действия.** Для обновления складов и перераспределения
+   бот в headless-режиме поднимает Chromium с сохранённым state,
+   открывает страницу перераспределения и кликает по реальным
+   элементам UI. WB видит обычный браузер с реальной сессией,
+   `X-Req-Sign` генерирует их же JS.
+
+## Что ещё нужно настроить: селекторы страницы перераспределения
+
+В `app/wb/client.py` помечены `# TODO(WB-UI)` места, где требуются
+CSS-селекторы реальной страницы перераспределения остатков:
+
+- `fetch_warehouses()` — как достать список доступных складов из DOM;
+- `submit_redistribution()` — как кликнуть «откуда → артикул →
+  количество → куда → подтвердить».
+
+Удобный способ их получить — Playwright Codegen:
+
+```bash
+playwright codegen https://seller.wildberries.ru/stocks-redistribution
+```
+
+Открывается браузер, выполняешь действия мышью, Playwright параллельно
+печатает Python-код с селекторами. Копируешь нужное в `client.py`.
 
 ## Архитектура
 
